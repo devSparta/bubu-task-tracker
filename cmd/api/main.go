@@ -10,8 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"fmt"
 
 	"github.com/devSparta/bubu-task-tracker/internal/config"
+	"github.com/devSparta/bubu-task-tracker/internal/platform/postgres"
 )
 
 type healthResponse struct {
@@ -22,18 +24,38 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := run(); err != nil {
+		slog.Error("application stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 
 	if err != nil {
-		slog.Error("failed to load configuration", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("load configuration: %w", err)
 	}
+
+	//Signal context
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	//Pool creation
+	ctxPool, cancelPool := context.WithTimeout(ctx, time.Second*5)
+
+	pool, err := postgres.Open(ctxPool, cfg.DatabaseURL)
+	cancelPool()
+
+	if err != nil {
+		return fmt.Errorf("open PostgreSQL: %w", err)
+	}
+
+	defer pool.Close()
+	slog.Info("connected to PostgreSQL")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", liveHandler)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -52,31 +74,30 @@ func main() {
 	errs := make(chan error, 1)
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
-			errs <- err
-		}
+		errs <- server.ListenAndServe()
 	}()
 
 	select {
 	case err := <-errs:
-		if err != nil {
-			slog.Error("Failed to start HTTP server", "error", err)
-			os.Exit(1)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("run HTTP server: %w", err)
 		}
 
 	case <-ctx.Done():
-		slog.Info("Server is shutting down")
+		slog.Info("server is shutting down")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownCancel()
 
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			slog.Error("Server forced to shutdown", "error", err)
-			os.Exit(1)
+		err := server.Shutdown(shutdownCtx)
+		shutdownCancel()
+
+		if err != nil {
+			return fmt.Errorf("shut down HTTP server: %w", err)
 		}
 
-		slog.Info("Server stopped")
+		slog.Info("server stopped")
 	}
+
+	return nil
 }
 
 func liveHandler(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +112,6 @@ func liveHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		slog.Error("Failed to encode response", "error", err)
+		slog.Error("failed to encode response", "error", err)
 	}
 }
