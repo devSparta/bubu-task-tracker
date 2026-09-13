@@ -2,23 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-	"fmt"
 
 	"github.com/devSparta/bubu-task-tracker/internal/config"
+	"github.com/devSparta/bubu-task-tracker/internal/httpapi/health"
 	"github.com/devSparta/bubu-task-tracker/internal/platform/postgres"
 )
-
-type healthResponse struct {
-	Status string `json:"status"`
-}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -41,7 +37,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	//Pool creation
+	//Pool opening
 	ctxPool, cancelPool := context.WithTimeout(ctx, time.Second*5)
 
 	pool, err := postgres.Open(ctxPool, cfg.DatabaseURL)
@@ -54,8 +50,13 @@ func run() error {
 	defer pool.Close()
 	slog.Info("connected to PostgreSQL")
 
+	//Health Handler creation
+	healthHandler := health.New(pool)
+
+	//mux
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health/live", liveHandler)
+	mux.HandleFunc("GET /health/live", healthHandler.Live)
+	mux.HandleFunc("GET /health/ready", healthHandler.Ready)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -98,20 +99,4 @@ func run() error {
 	}
 
 	return nil
-}
-
-func liveHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set(
-		"Content-Type",
-		"application/json; charset=utf-8",
-	)
-	w.WriteHeader(http.StatusOK)
-
-	response := healthResponse{
-		Status: "OK",
-	}
-
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		slog.Error("failed to encode response", "error", err)
-	}
 }

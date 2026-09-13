@@ -14,24 +14,21 @@ type Config struct {
 func Load() (Config, error) {
 	//HTTPAddr
 	cfg := Config{
-		HTTPAddr:    "",
+		HTTPAddr:    "127.0.0.1:18080",
 		DatabaseURL: "",
 	}
 
 	value, exists := os.LookupEnv("APP_HTTP_ADDR")
+
+	if value == " " {
+		return Config{}, errors.New("APP_HTTP_ADDR environment must be set")
+	}
+
 	value = strings.TrimSpace(value)
 
-	defaulHTTPAddr := "127.0.0.1:18080"
-
-	if !exists {
-		cfg.HTTPAddr = defaulHTTPAddr
+	if exists && value != "" {
+		cfg.HTTPAddr = value
 	}
-
-	if value == "" {
-		cfg.HTTPAddr = defaulHTTPAddr
-	}
-
-	cfg.HTTPAddr = value
 
 	//DatabaseURL
 	url, exists := os.LookupEnv("APP_DATABASE_URL")
