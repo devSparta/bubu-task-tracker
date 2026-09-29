@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	authapp "github.com/devSparta/bubu-task-tracker/internal/application/auth"
@@ -40,6 +42,13 @@ func (r *UserRepository) Create(
 	)
 
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23505" && pgErr.ConstraintName == "users_email_idx" {
+				return user.User{}, authapp.ErrEmailAlreadyExists
+			}
+		}
+
 		return user.User{}, fmt.Errorf("insert user: %w", err)
 	}
 

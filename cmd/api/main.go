@@ -11,8 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	authapp "github.com/devSparta/bubu-task-tracker/internal/application/auth"
 	"github.com/devSparta/bubu-task-tracker/internal/config"
+	authhttp "github.com/devSparta/bubu-task-tracker/internal/httpapi/auth"
 	"github.com/devSparta/bubu-task-tracker/internal/httpapi/health"
+	"github.com/devSparta/bubu-task-tracker/internal/platform/password"
 	"github.com/devSparta/bubu-task-tracker/internal/platform/postgres"
 )
 
@@ -37,7 +40,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	//Pool opening
+	//открытие Pool
 	ctxPool, cancelPool := context.WithTimeout(ctx, time.Second*5)
 
 	pool, err := postgres.Open(ctxPool, cfg.DatabaseURL)
@@ -50,13 +53,18 @@ func run() error {
 	defer pool.Close()
 	slog.Info("connected to PostgreSQL")
 
-	//Health Handler creation
+	//Подключение зависимостей
 	healthHandler := health.New(pool)
+	userRepository := postgres.NewUserRepository(pool)
+	hasher := password.NewArgon2ID()
+	authService := authapp.NewService(userRepository, hasher)
+	authHandler := authhttp.NewHandler(authService)
 
 	//mux
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", healthHandler.Live)
 	mux.HandleFunc("GET /health/ready", healthHandler.Ready)
+	mux.HandleFunc("POST /api/v1/auth/register", authHandler.Register)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
