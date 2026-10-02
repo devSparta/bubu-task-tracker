@@ -28,6 +28,14 @@ type registerResponse struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+type problemResponse struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
 type RegistrationService interface {
 	Register(ctx context.Context, input authapp.RegisterInput) (user.User, error)
 }
@@ -121,14 +129,6 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to encode registration response", "error", err)
 		return
 	}
-}
-
-type problemResponse struct {
-	Type   string `json:"type"`
-	Title  string `json:"title"`
-	Status int    `json:"status"`
-	Code   string `json:"code"`
-	Detail string `json:"detail"`
 }
 
 func writeProblem(
