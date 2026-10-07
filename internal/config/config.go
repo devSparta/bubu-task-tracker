@@ -3,12 +3,14 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	HTTPAddr    string
-	DatabaseURL string
+	HTTPAddr              string
+	DatabaseURL           string
+	IsSessionCookieSecure bool
 }
 
 func Load() (Config, error) {
@@ -18,16 +20,16 @@ func Load() (Config, error) {
 		DatabaseURL: "",
 	}
 
-	value, exists := os.LookupEnv("APP_HTTP_ADDR")
+	addr, exists := os.LookupEnv("APP_HTTP_ADDR")
 
-	if value == " " {
+	if addr == " " {
 		return Config{}, errors.New("APP_HTTP_ADDR environment must be set")
 	}
 
-	value = strings.TrimSpace(value)
+	addr = strings.TrimSpace(addr)
 
-	if exists && value != "" {
-		cfg.HTTPAddr = value
+	if exists && addr != "" {
+		cfg.HTTPAddr = addr
 	}
 
 	//DatabaseURL
@@ -43,6 +45,21 @@ func Load() (Config, error) {
 	}
 
 	cfg.DatabaseURL = url
+
+	//isSecureCookie
+	rawCookieSecure, exists := os.LookupEnv("APP_SESSION_COOKIE_SECURE")
+	if !exists {
+		return Config{}, errors.New("APP_SESSION_COOKIE_SECURE environment must be set")
+	}
+
+	rawCookieSecure = strings.TrimSpace(rawCookieSecure)
+
+	isCookieSecure, err := strconv.ParseBool(rawCookieSecure)
+	if err != nil {
+		return Config{}, errors.New("APP_SESSION_COOKIE_SECURE is not a boolean value")
+	}
+
+	cfg.IsSessionCookieSecure = isCookieSecure
 
 	return cfg, nil
 }

@@ -7,7 +7,8 @@ CREATE TABLE users
     password_hash text NOT NULL CHECK(TRIM(password_hash) <> '' AND password_hash = TRIM(password_hash)),
     email_verified_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT NOW(),
-    updated_at timestamptz NOT NULL DEFAULT NOW()
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    status varchar(16) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'blocked'))
 );
 
 CREATE UNIQUE INDEX users_email_idx ON users (LOWER(email));

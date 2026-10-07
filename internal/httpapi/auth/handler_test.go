@@ -17,23 +17,25 @@ import (
 )
 
 type fakeRegistrationService struct {
-	called      bool
-	input       authapp.RegisterInput
-	createdUser user.User
-	err         error
+	called bool
+	input  authapp.RegisterInput
+	result authapp.RegisterResult
+	err    error
 }
 
-func (s *fakeRegistrationService) Register(_ context.Context, input authapp.RegisterInput) (user.User, error) {
+func (s *fakeRegistrationService) Register(_ context.Context, input authapp.RegisterInput) (authapp.RegisterResult, error) {
 	s.called = true
 	s.input = input
 
-	return s.createdUser, s.err
+	return s.result, s.err
 }
 
 func TestHandlerRegisterRejectsUnsupportedMediaType(t *testing.T) {
 	service := &fakeRegistrationService{}
 
-	handler := NewHandler(service)
+	sessionCookieConfig := SessionCookieConfig{}
+
+	handler := NewHandler(service, sessionCookieConfig)
 
 	reader := strings.NewReader(`{}`)
 
@@ -118,7 +120,9 @@ func TestHandlerRegisterRejectsInvalidRequestBody(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			service := &fakeRegistrationService{}
 
-			handler := NewHandler(service)
+			sessionCookieConfig := SessionCookieConfig{}
+
+			handler := NewHandler(service, sessionCookieConfig)
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(tc.body))
 
@@ -174,7 +178,9 @@ func TestHandlerRegisterRejectsInvalidRequestBody(t *testing.T) {
 func TestHandlerRegisterRejectsTooLargeBody(t *testing.T) {
 	service := &fakeRegistrationService{}
 
-	handler := NewHandler(service)
+	sessionCookieConfig := SessionCookieConfig{}
+
+	handler := NewHandler(service, sessionCookieConfig)
 
 	tooLargeData := `{"email":"` +
 		strings.Repeat("a", (64<<10)+1) +
@@ -242,7 +248,9 @@ func TestHandlerRegisterMapsValidationErrorToUnprocessableEntity(t *testing.T) {
 		err: validationErr,
 	}
 
-	handler := NewHandler(service)
+	sessionCookieConfig := SessionCookieConfig{}
+
+	handler := NewHandler(service, sessionCookieConfig)
 
 	input := `{
 		"email": "",
@@ -334,7 +342,9 @@ func TestHandlerRegisterMapsEmailAlreadyExistsErrorToConflict(t *testing.T) {
 		),
 	}
 
-	handler := NewHandler(service)
+	sessionCookieConfig := SessionCookieConfig{}
+
+	handler := NewHandler(service, sessionCookieConfig)
 
 	body := `{
 		"email": "user@example.com",
@@ -421,7 +431,9 @@ func TestHandlerRegisterMapsUnexpectedErrorToInternalServerError(t *testing.T) {
 		err: errors.New("database connection lost"),
 	}
 
-	handler := NewHandler(service)
+	sessionCookieConfig := SessionCookieConfig{}
+
+	handler := NewHandler(service, sessionCookieConfig)
 
 	body := `{
 		"email":       "user@example.com",
@@ -495,7 +507,7 @@ func TestHandlerRegisterMapsUnexpectedErrorToInternalServerError(t *testing.T) {
 	}
 }
 
-func TestHandlerRegisterReturnsCreatedUser(t *testing.T) {
+func TestHandlerRegisterReturnsCreatedUserAndSetsSession(t *testing.T) {
 	createdAt := time.Date(2026, time.October, 10, 23, 0, 0, 0, time.UTC)
 
 	createdUser := user.User{
@@ -506,11 +518,23 @@ func TestHandlerRegisterReturnsCreatedUser(t *testing.T) {
 		CreatedAt:       createdAt,
 	}
 
-	service := &fakeRegistrationService{
-		createdUser: createdUser,
+	registerResult := authapp.RegisterResult{
+		User:             createdUser,
+		SessionToken:     "session-token",
+		CSRFToken:        "csrf-token",
+		SessionExpiresAt: createdAt.Add(30 * 24 * time.Hour),
 	}
 
-	handler := NewHandler(service)
+	service := &fakeRegistrationService{
+		result: registerResult,
+	}
+
+	sessionCookieConfig := SessionCookieConfig{
+		Name:   "session",
+		Secure: false,
+	}
+
+	handler := NewHandler(service, sessionCookieConfig)
 
 	body := `{
 		"email":       "user@example.com",
@@ -537,6 +561,7 @@ func TestHandlerRegisterReturnsCreatedUser(t *testing.T) {
 		)
 	}
 
+	//Проверка заголовков
 	if resp.Header.Get("Content-Type") != "application/json; charset=utf-8" {
 		t.Fatalf(
 			"response Content-Type = %q, want %q",
@@ -545,23 +570,41 @@ func TestHandlerRegisterReturnsCreatedUser(t *testing.T) {
 		)
 	}
 
+	if resp.Header.Get("X-CSRF-Token") != registerResult.CSRFToken {
+		t.Fatalf(
+			"X-CSRF-Token = %q, want %q",
+			resp.Header.Get("X-CSRF-Token"),
+			registerResult.CSRFToken,
+		)
+	}
+
+	if resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf(
+			"Cache-Control = %q, want %q",
+			resp.Header.Get("Cache-Control"),
+			"no-store",
+		)
+	}
+
+	//Проверка вызова сервиса
 	if !service.called {
 		t.Fatal("registration service was not called")
 	}
 
+	//Проверки полей тела ответа
 	var respBody struct {
-		ID              string    `json:"id"`
-		Email           string    `json:"email"`
-		DisplayName     string    `json:"display_name"`
+		ID            string    `json:"id"`
+		Email         string    `json:"email"`
+		DisplayName   string    `json:"display_name"`
 		EmailVerified *bool     `json:"email_verified"`
-		CreatedAt       time.Time `json:"created_at"`
+		CreatedAt     time.Time `json:"created_at"`
 	}
 
 	decoder := json.NewDecoder(resp.Body)
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&respBody); err != nil {
-		t.Fatalf("decode problem response: %v", err)
+		t.Fatalf("decode registration response: %v", err)
 	}
 
 	if respBody.ID != createdUser.ID.String() {
@@ -622,5 +665,301 @@ func TestHandlerRegisterReturnsCreatedUser(t *testing.T) {
 			service.input,
 			wantInput,
 		)
+	}
+
+	//проверка куки
+	cookies := resp.Cookies()
+	const expectedCookies = 1
+
+	if len(cookies) != expectedCookies {
+		t.Fatalf("cookies = %d, want %d",
+			len(cookies),
+			expectedCookies,
+		)
+	}
+
+	cookie := cookies[0]
+
+	if cookie.Name != sessionCookieConfig.Name {
+		t.Fatalf("cookie name = %q, want %q",
+			cookie.Name,
+			sessionCookieConfig.Name,
+		)
+	}
+
+	if cookie.Value != registerResult.SessionToken {
+		t.Fatalf("cookie value = %q, want %q",
+			cookie.Value,
+			registerResult.SessionToken,
+		)
+	}
+
+	if cookie.Path != "/" {
+		t.Fatalf("cookie path = %q, want /", cookie.Path)
+	}
+
+	if !cookie.Expires.Equal(registerResult.SessionExpiresAt) {
+		t.Fatalf("cookie expires = %#v, want %#v",
+			cookie.Expires,
+			registerResult.SessionExpiresAt,
+		)
+	}
+
+	if !cookie.HttpOnly {
+		t.Fatalf("cookie httponly = %t, want %t",
+			cookie.HttpOnly,
+			true,
+		)
+	}
+
+	if cookie.Secure != sessionCookieConfig.Secure {
+		t.Fatalf("cookie secure = %t, want %t",
+			cookie.Secure,
+			false,
+		)
+	}
+
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("cookie same_site = %v, want %v",
+			cookie.SameSite,
+			http.SameSiteLaxMode,
+		)
+	}
+}
+
+func TestHandlerRegisterSetsSecureHostSessionCookie(t *testing.T) {
+	createdAt := time.Date(
+		2026,
+		time.October,
+		10,
+		23,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	sessionExpiresAt := createdAt.Add(30 * 24 * time.Hour)
+
+	service := &fakeRegistrationService{
+		result: authapp.RegisterResult{
+			User: user.User{
+				ID:          uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+				Email:       "user@example.com",
+				DisplayName: "User",
+				CreatedAt:   createdAt,
+			},
+			SessionToken:     "session-token",
+			CSRFToken:        "csrf-token",
+			SessionExpiresAt: sessionExpiresAt,
+		},
+	}
+
+	cookieConfig := SessionCookieConfig{
+		Name:   "__Host-session",
+		Secure: true,
+	}
+
+	handler := NewHandler(service, cookieConfig)
+
+	body := `{
+		"email": "user@example.com",
+		"display_name": "User",
+		"password": "correct-password"
+	}`
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/auth/register",
+		strings.NewReader(body),
+	)
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+
+	handler.Register(rec, req)
+
+	resp := rec.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf(
+			"response status = %d, want %d",
+			resp.StatusCode,
+			http.StatusCreated,
+		)
+	}
+
+	cookies := resp.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies count = %d, want 1", len(cookies))
+	}
+
+	cookie := cookies[0]
+
+	if cookie.Name != cookieConfig.Name {
+		t.Fatalf(
+			"cookie name = %q, want %q",
+			cookie.Name,
+			cookieConfig.Name,
+		)
+	}
+
+	if cookie.Value != service.result.SessionToken {
+		t.Fatalf(
+			"cookie value = %q, want %q",
+			cookie.Value,
+			service.result.SessionToken,
+		)
+	}
+
+	if !cookie.Secure {
+		t.Fatal("cookie Secure = false, want true")
+	}
+
+	if !cookie.HttpOnly {
+		t.Fatal("cookie HttpOnly = false, want true")
+	}
+
+	if cookie.Path != "/" {
+		t.Fatalf("cookie Path = %q, want %q", cookie.Path, "/")
+	}
+
+	if cookie.Domain != "" {
+		t.Fatalf("cookie Domain = %q, want empty", cookie.Domain)
+	}
+
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf(
+			"cookie SameSite = %v, want %v",
+			cookie.SameSite,
+			http.SameSiteLaxMode,
+		)
+	}
+
+	if !cookie.Expires.Equal(sessionExpiresAt) {
+		t.Fatalf(
+			"cookie Expires = %v, want %v",
+			cookie.Expires,
+			sessionExpiresAt,
+		)
+	}
+}
+
+func TestHandlerRegisterDoesNotSetAuthArtifactsOnError(t *testing.T) {
+	validBody := `{
+		"email": "user@example.com",
+		"display_name": "User",
+		"password": "correct-password"
+	}`
+
+	tooLargeBody := `{"email":"` +
+		strings.Repeat("a", (64<<10)+1) +
+		`"}`
+
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		serviceErr  error
+		wantStatus  int
+	}{
+		{
+			name:        "unsupported media type",
+			contentType: "text/plain",
+			body:        `{}`,
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "invalid request body",
+			contentType: "application/json",
+			body:        `{"email":"`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "request body too large",
+			contentType: "application/json",
+			body:        tooLargeBody,
+			wantStatus:  http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:        "validation error",
+			contentType: "application/json",
+			body:        validBody,
+			serviceErr: &authapp.ValidationError{
+				Field:  "email",
+				Reason: "must not be empty",
+			},
+			wantStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:        "email already exists",
+			contentType: "application/json",
+			body:        validBody,
+			serviceErr:  authapp.ErrEmailAlreadyExists,
+			wantStatus:  http.StatusConflict,
+		},
+		{
+			name:        "unexpected error",
+			contentType: "application/json",
+			body:        validBody,
+			serviceErr:  errors.New("database connection lost"),
+			wantStatus:  http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeRegistrationService{
+				result: authapp.RegisterResult{
+					SessionToken: "must-not-be-used",
+					CSRFToken:    "must-not-be-used",
+				},
+				err: tc.serviceErr,
+			}
+
+			handler := NewHandler(
+				service,
+				SessionCookieConfig{
+					Name:   "session",
+					Secure: false,
+				},
+			)
+
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/auth/register",
+				strings.NewReader(tc.body),
+			)
+			req.Header.Set("Content-Type", tc.contentType)
+
+			rec := httptest.NewRecorder()
+
+			handler.Register(rec, req)
+
+			resp := rec.Result()
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf(
+					"response status = %d, want %d",
+					resp.StatusCode,
+					tc.wantStatus,
+				)
+			}
+
+			if setCookie := resp.Header.Values("Set-Cookie"); len(setCookie) != 0 {
+				t.Fatalf(
+					"unexpected Set-Cookie headers: %q",
+					setCookie,
+				)
+			}
+
+			if csrfToken := resp.Header.Get("X-CSRF-Token"); csrfToken != "" {
+				t.Fatalf(
+					"unexpected X-CSRF-Token = %q",
+					csrfToken,
+				)
+			}
+		})
 	}
 }

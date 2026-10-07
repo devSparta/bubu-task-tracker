@@ -22,23 +22,33 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 	}
 }
 
-func (r *UserRepository) Create(
+func (r *UserRepository) CreateUserWithSession(
 	ctx context.Context,
-	params authapp.CreateUserParams,
+	params authapp.CreateUserWithSessionParams,
 ) (user.User, error) {
-	const query = "INSERT INTO users (email, display_name, password_hash) " +
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return user.User{}, fmt.Errorf("begin registration transaction: %w", err)
+	}
+
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	const queryUser = "INSERT INTO users (email, display_name, password_hash) " +
 		"VALUES ($1, $2, $3) " +
-		"RETURNING id, email, display_name, email_verified_at, created_at, updated_at"
+		"RETURNING id, email, display_name, email_verified_at, created_at, updated_at, status"
 
 	createdUser := user.User{}
 
-	err := r.pool.QueryRow(ctx, query, params.Email, params.DisplayName, params.PasswordHash).Scan(
+	err = tx.QueryRow(ctx, queryUser, params.User.Email, params.User.DisplayName, params.User.PasswordHash).Scan(
 		&createdUser.ID,
 		&createdUser.Email,
 		&createdUser.DisplayName,
 		&createdUser.EmailVerifiedAt,
 		&createdUser.CreatedAt,
 		&createdUser.UpdatedAt,
+		&createdUser.Status,
 	)
 
 	if err != nil {
@@ -50,6 +60,28 @@ func (r *UserRepository) Create(
 		}
 
 		return user.User{}, fmt.Errorf("insert user: %w", err)
+	}
+
+	const querySession = "INSERT INTO sessions " +
+		"(user_id, token_hash, csrf_token_hash, created_at, last_seen_at, expires_at, absolute_expires_at) " +
+		"VALUES ($1, $2, $3, $4, $5, $6, $7)"
+
+	_, err = tx.Exec(ctx, querySession,
+		createdUser.ID,
+		params.Session.TokenHash,
+		params.Session.CSRFTokenHash,
+		params.Session.CreatedAt,
+		params.Session.LastSeenAt,
+		params.Session.ExpiresAt,
+		params.Session.AbsoluteExpiresAt,
+	)
+
+	if err != nil {
+		return user.User{}, fmt.Errorf("insert session: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return user.User{}, fmt.Errorf("commit registration transaction: %w", err)
 	}
 
 	return createdUser, nil

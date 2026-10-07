@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/devSparta/bubu-task-tracker/internal/domain/user"
 )
@@ -18,9 +20,35 @@ type fakePasswordHasher struct {
 
 type fakeUserRepository struct {
 	called      bool
-	params      CreateUserParams
+	params      CreateUserWithSessionParams
 	createdUser user.User
 	err         error
+}
+
+type generateResult struct {
+	token string
+	hash  []byte
+	err   error
+}
+
+type fakeGenerator struct {
+	results []generateResult
+	calls   int
+}
+
+func (g *fakeGenerator) Generate() (string, []byte, error) {
+	res := g.results[g.calls]
+	g.calls++
+
+	return res.token, res.hash, res.err
+}
+
+type fakeClock struct {
+	now time.Time
+}
+
+func (s *fakeClock) Now() time.Time {
+	return s.now
 }
 
 func (h *fakePasswordHasher) Hash(password string) (string, error) {
@@ -30,9 +58,9 @@ func (h *fakePasswordHasher) Hash(password string) (string, error) {
 	return h.hash, h.err
 }
 
-func (r *fakeUserRepository) Create(
+func (r *fakeUserRepository) CreateUserWithSession(
 	ctx context.Context,
-	params CreateUserParams,
+	params CreateUserWithSessionParams,
 ) (user.User, error) {
 	r.called = true
 	r.params = params
@@ -229,7 +257,11 @@ func TestServiceRegisterValidationFailureDoesNotCallDependencies(t *testing.T) {
 
 	repo := &fakeUserRepository{}
 
-	service := NewService(repo, hasher)
+	generator := &fakeGenerator{}
+
+	clock := &fakeClock{}
+
+	service := NewService(repo, hasher, generator, clock)
 
 	_, err := service.Register(context.Background(), input)
 
@@ -254,6 +286,10 @@ func TestServiceRegisterValidationFailureDoesNotCallDependencies(t *testing.T) {
 	if repo.called {
 		t.Fatal("repository was called for invalid input")
 	}
+
+	if generator.calls != 0 {
+		t.Fatal("generator was called")
+	}
 }
 
 func TestServiceRegisterSuccess(t *testing.T) {
@@ -277,9 +313,34 @@ func TestServiceRegisterSuccess(t *testing.T) {
 		createdUser: wantUser,
 	}
 
-	service := NewService(repo, hasher)
+	wantSessionToken := "session-token"
+	wantSessionHash := bytes.Repeat([]byte{1}, 32)
 
-	createdUser, err := service.Register(context.Background(), input)
+	wantCSRFToken := "csrf-token"
+	wantCSRFHash := bytes.Repeat([]byte{2}, 32)
+
+	generator := &fakeGenerator{
+		results: []generateResult{
+			{
+				token: wantSessionToken,
+				hash:  wantSessionHash,
+			},
+			{
+				token: wantCSRFToken,
+				hash:  wantCSRFHash,
+			},
+		},
+	}
+
+	wantNow := time.Date(2026, time.October, 10, 10, 0, 0, 0, time.UTC)
+
+	clock := &fakeClock{
+		now: wantNow,
+	}
+
+	service := NewService(repo, hasher, generator, clock)
+
+	registerResult, err := service.Register(context.Background(), input)
 
 	if err != nil {
 		t.Fatalf("Register() error = %v, want nil", err)
@@ -303,19 +364,79 @@ func TestServiceRegisterSuccess(t *testing.T) {
 		PasswordHash: "hashed",
 	}
 
-	if repo.params != wantParams {
+	if repo.params.User != wantParams {
 		t.Fatalf(
 			"repository params = %#v, want %#v",
-			repo.params,
+			repo.params.User,
 			wantParams,
 		)
 	}
 
-	if createdUser != wantUser {
+	if registerResult.User != wantUser {
 		t.Fatalf(
 			"Register() user = %#v, want %#v",
-			createdUser,
+			registerResult.User,
 			wantUser,
+		)
+	}
+
+	if generator.calls != 2 {
+		t.Fatalf("generator called = %d, want 2", generator.calls)
+	}
+
+	if registerResult.SessionToken != wantSessionToken {
+		t.Fatalf("invalid session token = %v, want %v", registerResult.SessionToken, wantSessionToken)
+	}
+
+	if registerResult.CSRFToken != wantCSRFToken {
+		t.Fatalf("invalid csrf token = %v, want %v", registerResult.CSRFToken, wantCSRFToken)
+	}
+
+	if !bytes.Equal(repo.params.Session.TokenHash, wantSessionHash) {
+		t.Fatalf("invalid session hash = %v, want %v", repo.params.Session.TokenHash, wantSessionHash)
+	}
+
+	if !bytes.Equal(repo.params.Session.CSRFTokenHash, wantCSRFHash) {
+		t.Fatalf("invalid csrf hash = %v, want %v", repo.params.Session.CSRFTokenHash, wantCSRFHash)
+	}
+
+	if !repo.params.Session.CreatedAt.Equal(wantNow) {
+		t.Fatalf(
+			"session CreatedAt = %v, want %v",
+			repo.params.Session.CreatedAt,
+			wantNow,
+		)
+	}
+
+	if !repo.params.Session.LastSeenAt.Equal(wantNow) {
+		t.Fatalf(
+			"session LastSeenAt = %v, want %v",
+			repo.params.Session.LastSeenAt,
+			wantNow,
+		)
+	}
+
+	if !repo.params.Session.ExpiresAt.Equal(wantNow.Add(sessionIdleTimeout)) {
+		t.Fatalf(
+			"session ExpiresAt = %v, want %v",
+			repo.params.Session.ExpiresAt,
+			wantNow.Add(sessionIdleTimeout),
+		)
+	}
+
+	if !repo.params.Session.AbsoluteExpiresAt.Equal(wantNow.Add(sessionAbsoluteTimeout)) {
+		t.Fatalf(
+			"session AbsoluteExpiresAt = %v, want %v",
+			repo.params.Session.AbsoluteExpiresAt,
+			wantNow.Add(sessionAbsoluteTimeout),
+		)
+	}
+
+	if !registerResult.SessionExpiresAt.Equal(wantNow.Add(sessionAbsoluteTimeout)) {
+		t.Fatalf(
+			"session SessionExpiresAt = %v, want %v",
+			registerResult.SessionExpiresAt,
+			wantNow.Add(sessionAbsoluteTimeout),
 		)
 	}
 }
@@ -324,12 +445,16 @@ func TestServiceRegisterHasherFailureStopsBeforeRepository(t *testing.T) {
 	hashErr := errors.New("hash failed")
 
 	hasher := &fakePasswordHasher{
-		err:  hashErr,
+		err: hashErr,
 	}
 
 	repo := &fakeUserRepository{}
 
-	service := NewService(repo, hasher)
+	generator := &fakeGenerator{}
+
+	clock := &fakeClock{}
+
+	service := NewService(repo, hasher, generator, clock)
 
 	input := RegisterInput{
 		Email:       " TeSting@Mail.Ru ",
@@ -362,6 +487,10 @@ func TestServiceRegisterHasherFailureStopsBeforeRepository(t *testing.T) {
 	if repo.called {
 		t.Fatal("repository was called")
 	}
+
+	if generator.calls != 0 {
+		t.Fatal("generator was called after hasher failure")
+	}
 }
 
 func TestServiceRegisterPreservesEmailAlreadyExistsError(t *testing.T) {
@@ -380,7 +509,28 @@ func TestServiceRegisterPreservesEmailAlreadyExistsError(t *testing.T) {
 		Password:    "  correct-password  ",
 	}
 
-	service := NewService(repo, hasher)
+	wantSessionToken := "session-token"
+	wantSessionHash := bytes.Repeat([]byte{1}, 32)
+
+	wantCSRFToken := "csrf-token"
+	wantCSRFHash := bytes.Repeat([]byte{2}, 32)
+
+	generator := &fakeGenerator{
+		results: []generateResult{
+			{
+				token: wantSessionToken,
+				hash:  wantSessionHash,
+			},
+			{
+				token: wantCSRFToken,
+				hash:  wantCSRFHash,
+			},
+		},
+	}
+
+	clock := &fakeClock{}
+
+	service := NewService(repo, hasher, generator, clock)
 
 	_, err := service.Register(context.Background(), input)
 
@@ -398,5 +548,9 @@ func TestServiceRegisterPreservesEmailAlreadyExistsError(t *testing.T) {
 
 	if !repo.called {
 		t.Fatal("repository was not called")
+	}
+
+	if generator.calls != 2 {
+		t.Fatalf("generator called = %d, want 2", generator.calls)
 	}
 }

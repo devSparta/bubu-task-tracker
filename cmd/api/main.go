@@ -15,13 +15,20 @@ import (
 	"github.com/devSparta/bubu-task-tracker/internal/config"
 	authhttp "github.com/devSparta/bubu-task-tracker/internal/httpapi/auth"
 	"github.com/devSparta/bubu-task-tracker/internal/httpapi/health"
+	"github.com/devSparta/bubu-task-tracker/internal/platform/clock"
 	"github.com/devSparta/bubu-task-tracker/internal/platform/password"
 	"github.com/devSparta/bubu-task-tracker/internal/platform/postgres"
+	"github.com/devSparta/bubu-task-tracker/internal/platform/sessiontoken"
+	"github.com/joho/godotenv"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		slog.Error("load .env", "error", err)
+	}
 
 	if err := run(); err != nil {
 		slog.Error("application stopped", "error", err)
@@ -36,11 +43,23 @@ func run() error {
 		return fmt.Errorf("load configuration: %w", err)
 	}
 
+	//Имя куки
+	sessionCookieName := "session"
+	if cfg.IsSessionCookieSecure {
+		sessionCookieName = "__Host-session"
+	}
+
+	//Конфиг куки
+	sessionCookieConfig := authhttp.SessionCookieConfig{
+		Name:   sessionCookieName,
+		Secure: cfg.IsSessionCookieSecure,
+	}
+
 	//Signal context
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	//открытие Pool
+	//Открытие Pool
 	ctxPool, cancelPool := context.WithTimeout(ctx, time.Second*5)
 
 	pool, err := postgres.Open(ctxPool, cfg.DatabaseURL)
@@ -55,10 +74,14 @@ func run() error {
 
 	//Подключение зависимостей
 	healthHandler := health.New(pool)
+
 	userRepository := postgres.NewUserRepository(pool)
 	hasher := password.NewArgon2ID()
-	authService := authapp.NewService(userRepository, hasher)
-	authHandler := authhttp.NewHandler(authService)
+	tokenGenerator := sessiontoken.NewGenerator()
+	systemClock := clock.New()
+
+	authService := authapp.NewService(userRepository, hasher, tokenGenerator, systemClock)
+	authHandler := authhttp.NewHandler(authService, sessionCookieConfig)
 
 	//mux
 	mux := http.NewServeMux()

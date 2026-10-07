@@ -11,7 +11,6 @@ import (
 	"time"
 
 	authapp "github.com/devSparta/bubu-task-tracker/internal/application/auth"
-	"github.com/devSparta/bubu-task-tracker/internal/domain/user"
 )
 
 type registerRequest struct {
@@ -36,17 +35,24 @@ type problemResponse struct {
 	Detail string `json:"detail"`
 }
 
+type SessionCookieConfig struct {
+	Name   string
+	Secure bool
+}
+
 type RegistrationService interface {
-	Register(ctx context.Context, input authapp.RegisterInput) (user.User, error)
+	Register(ctx context.Context, input authapp.RegisterInput) (authapp.RegisterResult, error)
 }
 
 type Handler struct {
-	service RegistrationService
+	service             RegistrationService
+	sessionCookieConfig SessionCookieConfig
 }
 
-func NewHandler(service RegistrationService) *Handler {
+func NewHandler(service RegistrationService, sessionCookieConfig SessionCookieConfig) *Handler {
 	return &Handler{
-		service: service,
+		service:             service,
+		sessionCookieConfig: sessionCookieConfig,
 	}
 }
 
@@ -94,7 +100,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		Password:    req.Password,
 	}
 
-	createdUser, err := h.service.Register(r.Context(), input)
+	result, err := h.service.Register(r.Context(), input)
 	var validationErr *authapp.ValidationError
 
 	if err != nil {
@@ -114,14 +120,28 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	regResp := registerResponse{
-		ID:            createdUser.ID.String(),
-		Email:         createdUser.Email,
-		DisplayName:   createdUser.DisplayName,
-		EmailVerified: createdUser.EmailVerifiedAt != nil,
-		CreatedAt:     createdUser.CreatedAt,
+		ID:            result.User.ID.String(),
+		Email:         result.User.Email,
+		DisplayName:   result.User.DisplayName,
+		EmailVerified: result.User.EmailVerifiedAt != nil,
+		CreatedAt:     result.User.CreatedAt,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-CSRF-Token", result.CSRFToken)
+	w.Header().Set("Cache-Control", "no-store")
+
+	sessionCookie := &http.Cookie{
+		Name:     h.sessionCookieConfig.Name,
+		Value:    result.SessionToken,
+		Path:     "/",
+		Expires:  result.SessionExpiresAt.UTC(),
+		HttpOnly: true,
+		Secure:   h.sessionCookieConfig.Secure,
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	http.SetCookie(w, sessionCookie)
 
 	w.WriteHeader(http.StatusCreated)
 

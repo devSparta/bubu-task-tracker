@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/devSparta/bubu-task-tracker/internal/domain/user"
+)
+
+const (
+	sessionIdleTimeout     = 12 * time.Hour
+	sessionAbsoluteTimeout = 30 * 24 * time.Hour
 )
 
 type RegisterInput struct {
@@ -16,58 +22,124 @@ type RegisterInput struct {
 	Password    string
 }
 
+type RegisterResult struct {
+	User             user.User
+	SessionToken     string
+	CSRFToken        string
+	SessionExpiresAt time.Time
+}
+
 type CreateUserParams struct {
 	Email        string
 	DisplayName  string
 	PasswordHash string
 }
 
+type CreateSessionParams struct {
+	TokenHash         []byte
+	CSRFTokenHash     []byte
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	ExpiresAt         time.Time
+	AbsoluteExpiresAt time.Time
+}
+
+type CreateUserWithSessionParams struct {
+	User    CreateUserParams
+	Session CreateSessionParams
+}
+
 type PasswordHasher interface {
 	Hash(password string) (string, error)
 }
 
-type UserRepository interface {
-	Create(ctx context.Context, params CreateUserParams) (user.User, error)
+type RegistrationRepository interface {
+	CreateUserWithSession(ctx context.Context, params CreateUserWithSessionParams) (user.User, error)
+}
+
+type SessionTokenGenerator interface {
+	Generate() (token string, hash []byte, err error)
+}
+
+type Clock interface {
+	Now() time.Time
 }
 
 type Service struct {
-	users  UserRepository
-	hasher PasswordHasher
+	registrations RegistrationRepository
+	hasher        PasswordHasher
+	generator     SessionTokenGenerator
+	clock         Clock
 }
 
 // Конструктор Service
-func NewService(users UserRepository, hasher PasswordHasher) *Service {
+func NewService(registrations RegistrationRepository, hasher PasswordHasher, generator SessionTokenGenerator, clock Clock) *Service {
 	return &Service{
-		users:  users,
-		hasher: hasher,
+		registrations: registrations,
+		hasher:        hasher,
+		generator:     generator,
+		clock:         clock,
 	}
 }
 
-func (s *Service) Register(ctx context.Context, input RegisterInput) (user.User, error) {
+func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterResult, error) {
 	normalized := normalizeRegisterInput(input)
 
 	err := validateRegisterInput(normalized)
 	if err != nil {
-		return user.User{}, err
+		return RegisterResult{}, err
 	}
 
 	passwordHash, err := s.hasher.Hash(normalized.Password)
 	if err != nil {
-		return user.User{}, fmt.Errorf("hash password: %w", err)
+		return RegisterResult{}, fmt.Errorf("hash password: %w", err)
 	}
 
-	params := CreateUserParams{
+	sessionToken, sessionHash, err := s.generator.Generate()
+	if err != nil {
+		return RegisterResult{}, fmt.Errorf("generate session token: %w", err)
+	}
+
+	csrfToken, csrfHash, err := s.generator.Generate()
+	if err != nil {
+		return RegisterResult{}, fmt.Errorf("generate CSRF token: %w", err)
+	}
+
+	userParams := CreateUserParams{
 		Email:        normalized.Email,
 		DisplayName:  normalized.DisplayName,
 		PasswordHash: passwordHash,
 	}
 
-	createdUser, err := s.users.Create(ctx, params)
-	if err != nil {
-		return user.User{}, fmt.Errorf("create user: %w", err)
+	now := s.clock.Now().UTC()
+
+	sessionParams := CreateSessionParams{
+		TokenHash:         sessionHash,
+		CSRFTokenHash:     csrfHash,
+		CreatedAt:         now,
+		LastSeenAt:        now,
+		ExpiresAt:         now.Add(sessionIdleTimeout),
+		AbsoluteExpiresAt: now.Add(sessionAbsoluteTimeout),
 	}
 
-	return createdUser, nil
+	params := CreateUserWithSessionParams{
+		User:    userParams,
+		Session: sessionParams,
+	}
+
+	createdUser, err := s.registrations.CreateUserWithSession(ctx, params)
+	if err != nil {
+		return RegisterResult{}, fmt.Errorf("create user with session: %w", err)
+	}
+
+	result := RegisterResult{
+		User:             createdUser,
+		SessionToken:     sessionToken,
+		CSRFToken:        csrfToken,
+		SessionExpiresAt: sessionParams.AbsoluteExpiresAt,
+	}
+
+	return result, nil
 }
 
 // Нормализует поля в структуре input, возвращает нормализованную структуру RegisterInput
